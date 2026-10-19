@@ -31,7 +31,7 @@ import sys
 import time
 import wave
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 HOME = os.path.expanduser("~")
 CAPTURES = os.path.join(HOME, "Library/Application Support/scrawl/captures")
 STATE = os.path.join(HOME, "Library/Application Support/scrawl-superwhisper")
@@ -51,6 +51,7 @@ GUARD_S = 25  # after writing, keep reapplying if Scrawl rewrites scrawl.json
 SW_RETRY_S = 8
 SW_BASE_WAIT_S = 30
 SW_MAX_WAIT_S = 600
+MAX_ALIGN_CELLS = 4_000_000  # word pairs compared when lining up (about 2,000 x 2,000 words)
 
 
 def log(message):
@@ -165,6 +166,8 @@ def align(ours, theirs):
     """For each of `ours` (word texts), the index into `theirs` it lines up with, or None."""
     a, b = [token(t) for t in ours], [token(t) for t in theirs]
     n, m = len(a), len(b)
+    if n * m > MAX_ALIGN_CELLS:
+        raise ValueError(f"too long to line up ({n} x {m} words)")
     lcs = [[0] * (m + 1) for _ in range(n + 1)]
     for i in range(n - 1, -1, -1):
         for j in range(m - 1, -1, -1):
@@ -267,7 +270,10 @@ def rewrite(manifest, sw_words, model_key, model_name):
     owners = owners_of_apple_words(keyframes, apple_words)
     if owners is None:
         return None, "the keyframes' text doesn't match the transcript (unexpected Scrawl format)"
-    matches = align([w["text"] for w in sw_words], [w["text"] for w in apple_words])
+    try:
+        matches = align([w["text"] for w in sw_words], [w["text"] for w in apple_words])
+    except ValueError as error:
+        return None, str(error)
     matched = sum(1 for m in matches if m is not None)
     if matched < MIN_MATCHED * len(sw_words):
         return None, f"only {matched} of {len(sw_words)} words lined up with Apple's"
@@ -315,11 +321,35 @@ def read_manifest(bundle):
         return json.load(f)
 
 
-def write_json(path, value):
+def write_text(path, text):
+    """Atomic write that never follows a link planted at the temporary name."""
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(value, f, indent=2, ensure_ascii=False)
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
     os.replace(tmp, path)
+
+
+def write_json(path, value):
+    write_text(path, json.dumps(value, indent=2, ensure_ascii=False))
+
+
+def bundle_audio(bundle, manifest):
+    """The capture's own audio file, or None. A manifest can't point the add-on at a file
+    outside its capture folder (which would otherwise go to Superwhisper, and with a cloud
+    model, off the Mac)."""
+    name = manifest.get("audio")
+    if not isinstance(name, str) or not name or os.path.basename(name) != name:
+        return None
+    path = os.path.join(bundle, name)
+    real_bundle = os.path.realpath(bundle)
+    if os.path.dirname(os.path.realpath(path)) != real_bundle or not os.path.isfile(path):
+        return None
+    return path
 
 
 def write_summary(bundle):
@@ -328,9 +358,7 @@ def write_summary(bundle):
         return
     out = subprocess.run([binary, "inspect", bundle], capture_output=True, text=True, timeout=30)
     if out.returncode == 0 and out.stdout.strip():
-        with open(os.path.join(bundle, "summary.md.tmp"), "w") as f:
-            f.write(out.stdout)
-        os.replace(os.path.join(bundle, "summary.md.tmp"), os.path.join(bundle, "summary.md"))
+        write_text(os.path.join(bundle, "summary.md"), out.stdout)
 
 
 def ours(manifest):
@@ -374,12 +402,12 @@ def process(bundle, guard=True):
         log(f"{name}: never finished saving; skipped")
         return
     manifest = read_manifest(bundle)
-    audio = manifest.get("audio") and os.path.join(bundle, manifest["audio"])
+    audio = bundle_audio(bundle, manifest)
     if ours(manifest):
         print(f"{name} already has Superwhisper's words (`undo` puts Apple's back).")
         return
-    if not audio or not os.path.exists(audio):
-        log(f"{name}: no audio; left as is")
+    if not audio:
+        log(f"{name}: no audio in the capture; left as is")
         write_json(os.path.join(bundle, DONE), {"skipped": "no audio"})
         return
     began = time.monotonic()
@@ -423,8 +451,7 @@ def undo(bundle):
         sys.exit("No Apple transcript saved for this capture.")
     os.replace(backup, os.path.join(bundle, MANIFEST))
     write_summary(bundle)
-    with open(os.path.join(bundle, DONE), "w") as f:
-        json.dump({"skipped": "undone"}, f)
+    write_json(os.path.join(bundle, DONE), {"skipped": "undone"})
     print("Apple's transcript restored.")
 
 

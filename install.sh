@@ -10,7 +10,12 @@ CAPTURES="$HOME/Library/Application Support/scrawl/captures"
 LABEL="com.scrawl-superwhisper.watch"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 SCRIPT="$HOME_DIR/scrawl_superwhisper.py"
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+# A local copy is used only when this file itself is run from a checkout. Piped through
+# `curl | bash` there is no script file, and the current folder must never be trusted.
+HERE=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 say() { printf '%s\n' "$*"; }
 
@@ -26,7 +31,9 @@ mkdir -p "$HOME_DIR" "$CAPTURES" "$HOME/Library/LaunchAgents" "$HOME/Library/Log
 if [[ -n "$HERE" && -f "$HERE/scrawl_superwhisper.py" ]]; then
   cp "$HERE/scrawl_superwhisper.py" "$SCRIPT"
 else
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/scrawl_superwhisper.py" -o "$SCRIPT.tmp"
+  curl -fsSL --proto '=https' --tlsv1.2 "https://raw.githubusercontent.com/$REPO/$BRANCH/scrawl_superwhisper.py" -o "$SCRIPT.tmp"
+  /usr/bin/python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$SCRIPT.tmp" \
+    || { rm -f "$SCRIPT.tmp"; say "The download didn't look right; nothing was installed."; exit 1; }
   mv "$SCRIPT.tmp" "$SCRIPT"
 fi
 chmod +x "$SCRIPT"
@@ -52,7 +59,7 @@ launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 
 say ""
-say "scrawl-superwhisper is installed."
+say "scrawl-superwhisper $(/usr/bin/python3 "$SCRIPT" --version) is installed."
 [[ -d /Applications/superwhisper.app || -d "$HOME/Applications/superwhisper.app" ]] \
   || say "  ! Superwhisper isn't installed yet: https://superwhisper.com"
 [[ -d /Applications/Scrawl.app || -d "$HOME/Applications/Scrawl.app" ]] \

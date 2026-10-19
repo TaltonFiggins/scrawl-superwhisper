@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 
 import scrawl_superwhisper as sw
@@ -85,6 +87,40 @@ class Text(unittest.TestCase):
     def test_sentences_break_at_punctuation_and_long_pauses(self):
         segs = sw.sentences(words((0, 100, "One."), (200, 300, "Two"), (2000, 2100, "three"), (2200, 2300, "four")))
         self.assertEqual([(s["t0"], s["text"]) for s in segs], [(0, "One."), (200, "Two"), (2000, "three four")])
+
+
+class Safety(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.bundle = os.path.join(self.dir, "capture.scrawl")
+        os.mkdir(self.bundle)
+        open(os.path.join(self.bundle, "audio.wav"), "w").close()
+        self.outside = os.path.join(self.dir, "private.txt")
+        with open(self.outside, "w") as f:
+            f.write("secret")
+
+    def test_audio_must_be_a_file_inside_the_capture(self):
+        self.assertEqual(sw.bundle_audio(self.bundle, {"audio": "audio.wav"}),
+                         os.path.join(self.bundle, "audio.wav"))
+        for bad in [self.outside, "../private.txt", "sub/audio.wav", "", None, 7, "missing.wav"]:
+            self.assertIsNone(sw.bundle_audio(self.bundle, {"audio": bad}), bad)
+        os.symlink(self.outside, os.path.join(self.bundle, "link.wav"))
+        self.assertIsNone(sw.bundle_audio(self.bundle, {"audio": "link.wav"}), "symlink out")
+
+    def test_writes_never_follow_a_planted_link(self):
+        target = os.path.join(self.bundle, "scrawl.json")
+        os.symlink(self.outside, target + ".tmp")
+        sw.write_json(target, {"ok": True})
+        with open(self.outside) as f:
+            self.assertEqual(f.read(), "secret")
+        with open(target) as f:
+            self.assertIn("ok", f.read())
+
+    def test_huge_transcripts_are_refused_not_ground_through(self):
+        many = [{"t0": 0, "t1": 1, "text": "word"}] * 2100
+        out, reason = sw.rewrite(manifest(many, ["word " * 2100]), [{"text": "word"}] * 2100, "sv-1", "")
+        self.assertIsNone(out)
+        self.assertIn("too long", reason)
 
 
 if __name__ == "__main__":
